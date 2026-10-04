@@ -41,4 +41,29 @@ export class HttpError extends Error {
   static invalidRequest(code: string, message: string, details?: unknown): HttpError {
     return new HttpError(400, code, message, details);
   }
+
+  /** 409 Conflict：同一上报号已受理但本次内容不同 */
+  static reportConflict(details?: unknown): HttpError {
+    return new HttpError(
+      409,
+      'report_conflict',
+      '该上报号已受理，但本次上报内容与原内容不一致（幂等重试要求内容完全相同）',
+      details,
+    );
+  }
+
+  /** 409 Conflict：核对作业已结案冻结，拒绝新上报 */
+  static jobClosed(message = '核对作业已结案并冻结结果，拒绝新的上报', details?: unknown): HttpError {
+    return new HttpError(409, 'verification_job_closed', message, details);
+  }
+
+  /** 409 Conflict：核对尚有差异，不能结案，作业继续开放 */
+  static verificationNotComplete(details?: unknown): HttpError {
+    return new HttpError(
+      409,
+      'verification_not_complete',
+      '核对尚未完成：仍存在缺失、错位或清单外箱，作业继续开放',
+      details,
+    );
+  }
 }

@@ -72,3 +72,54 @@ export const applyMovesSchema = applyMovesInput.transform((d) => ({
 export const issueManifestSchema = z.object({
   expectedRevision: nonNegativeInt,
 });
+
+/* ---------- 现场装船核对 ---------- */
+
+const idString = z.string().trim().min(1, '不能为空').max(64);
+
+/**
+ * 上报内容：position 与 revoked 二选一。
+ *  - 提供 position：实装到该三维坐标
+ *  - revoked:true（或 position:null）：撤销，视为未装
+ */
+export const verificationReportSchema = z
+  .object({
+    reportId: idString,
+    boxNo: idString.max(32),
+    position: positionSchema.nullable().optional(),
+    revoked: z.boolean().optional(),
+  })
+  .superRefine((d, ctx) => {
+    const wantsRevoke = d.revoked === true;
+    const hasPosition = d.position !== undefined;
+    if (wantsRevoke && hasPosition && d.position !== null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['revoked'],
+        message: '撤销上报不得同时携带实装坐标（revoked=true 时 position 必须为空或缺省）',
+      });
+    }
+    if (!wantsRevoke && hasPosition && d.position === null) {
+      // position:null 等价于撤销，允许
+      return;
+    }
+    if (!wantsRevoke && !hasPosition) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['position'],
+        message: '必须提供实装坐标 position，或显式 revoked:true 表示撤销',
+      });
+    }
+  })
+  .transform((d) => ({
+    reportId: d.reportId,
+    boxNo: d.boxNo,
+    revoked: d.revoked === true || d.position === null,
+    position: d.revoked === true || d.position === null || d.position === undefined
+      ? null
+      : d.position,
+  }));
+
+export const verificationReportsSchema = z
+  .object({ reports: z.array(verificationReportSchema).min(1, '至少包含一条上报') })
+  .transform((d) => ({ reports: d.reports }));

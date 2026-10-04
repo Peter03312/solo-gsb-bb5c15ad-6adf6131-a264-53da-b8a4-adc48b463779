@@ -90,3 +90,47 @@ GET {{host}}/api/voyages/{{id}}/manifests
 
 ### 取某修订号的冻结清单
 GET {{host}}/api/voyages/{{id}}/manifests/4
+
+### ==========================================================
+### 现场装船核对（基准为已签发清单；先把下面 @rev 设为已签发修订号）
+### ==========================================================
+
+@rev = 4
+@job = 00000000-0000-0000-0000-000000000000
+
+### 以某修订号的“已签发清单”开启核对作业（同清单至多一个，重复开启幂等）
+POST {{host}}/api/voyages/{{id}}/verification-jobs/{{rev}}
+
+### 航次的核对作业列表
+GET {{host}}/api/voyages/{{id}}/verification-jobs
+
+### 作业详情 + 核对明细（应装/已核对/缺失/错位/清单外）
+GET {{host}}/api/verification-jobs/{{job}}
+
+### 上报实装（坐标）与撤销（revoked:true 或 position:null；reportId 唯一）
+POST {{host}}/api/verification-jobs/{{job}}/reports
+Content-Type: application/json
+
+{
+  "reports": [
+    { "reportId": "R-1", "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+    { "reportId": "R-2", "boxNo": "BOX-2", "revoked": true }
+  ]
+}
+
+### 相同上报号+相同内容重试（幂等返回原结果）
+POST {{host}}/api/verification-jobs/{{job}}/reports
+Content-Type: application/json
+
+{
+  "reports": [
+    { "reportId": "R-1", "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } }
+  ]
+}
+
+### 上报留痕（作业内顺序，撤销/重试均可追溯）
+GET {{host}}/api/verification-jobs/{{job}}/reports
+
+### 申请结案：完全一致才冻结；有差异返回 409 且作业继续开放
+POST {{host}}/api/verification-jobs/{{job}}/close
+

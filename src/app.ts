@@ -2,6 +2,7 @@ import express from 'express';
 import { Pool } from 'pg';
 import { createApiRouter, errorHandler } from './http/routes';
 import { VoyageService } from './service';
+import { VerificationService } from './verification';
 import { ping } from './db';
 
 export function createApp(pool: Pool): express.Express {
@@ -17,7 +18,8 @@ export function createApp(pool: Pool): express.Express {
   });
 
   const service = new VoyageService(pool);
-  app.use('/api', createApiRouter(service));
+  const verification = new VerificationService(pool);
+  app.use('/api', createApiRouter(service, verification));
 
   app.use((_req, res) => {
     res.status(404).json({ error: { code: 'route_not_found', message: '接口不存在' } });

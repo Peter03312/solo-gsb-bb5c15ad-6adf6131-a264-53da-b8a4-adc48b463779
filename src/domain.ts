@@ -352,3 +352,116 @@ export function validateLayout(input: ValidateLayoutInput): Violation[] {
 function comparePosition(a: Position, b: Position): number {
   return a.bay - b.bay || a.row - b.row || a.tier - b.tier;
 }
+
+/* ====================================================================== */
+/* 现场装船核对（reconciliation）                                          */
+/* ====================================================================== */
+
+/** 一条核对上报（归一化后）：position 为 null 表示撤销（未装） */
+export interface VerificationReportInput {
+  reportId: string;
+  boxNo: string;
+  position: Position | null;
+}
+
+/** 某箱当前实装状态（由该箱号最后一条上报决定） */
+export interface ActualBoxState {
+  boxNo: string;
+  /** 当前实装坐标；null 表示最后一条为撤销（未装） */
+  position: Position | null;
+}
+
+/** 清单外箱当前实装（撤销的清单外箱不算实装，故此处坐标恒非空） */
+export interface ExtraBox {
+  boxNo: string;
+  position: Position;
+}
+
+export interface ReconciliationItem {
+  boxNo: string;
+  expectedPosition: Position;
+  /** 已核对（坐标一致）时为当前实装坐标，否则为 null */
+  actualPosition: Position | null;
+  status: 'verified' | 'missing' | 'misplaced';
+}
+
+export interface ReconciliationResult {
+  expected: ReconciliationItem[];
+  verified: ReconciliationItem[];
+  missing: ReconciliationItem[];
+  misplaced: ReconciliationItem[];
+  extra: ExtraBox[];
+  /**
+   * 是否可结案：所有清单箱当前坐标与冻结清单一致（无缺失/错位），且无清单外实装箱。
+   * 撤销即未装；清单外箱仅在仍处于实装（未撤销）时才计入 extra。
+   */
+  complete: boolean;
+}
+
+/** 计算上报内容指纹：相同上报号重试时据此判定“内容相同”还是“冲突” */
+export function verificationContentHash(boxNo: string, position: Position | null): string {
+  const key = position === null ? 'REVOKED' : `${position.bay}/${position.row}/${position.tier}`;
+  return `${boxNo}#${key}`;
+}
+
+/**
+ * 以冻结清单为基准，对当前实装状态做核对分类。
+ *  - verified  清单箱且当前坐标与清单一致
+ *  - missing   清单箱当前未装（无上报、被撤销，或只剩撤销记录）
+ *  - misplaced 清单箱已装但坐标与清单不一致
+ *  - extra     非清单箱当前处于实装状态
+ */
+export function reconcile(
+  manifest: Placement[],
+  actual: ActualBoxState[],
+): ReconciliationResult {
+  const expectedMap = new Map<string, Position>();
+  for (const item of manifest) expectedMap.set(item.boxNo, item.position);
+
+  const actualMap = new Map<string, Position | null>();
+  for (const state of actual) actualMap.set(state.boxNo, state.position);
+
+  const expected: ReconciliationItem[] = [];
+  const verified: ReconciliationItem[] = [];
+  const missing: ReconciliationItem[] = [];
+  const misplaced: ReconciliationItem[] = [];
+
+  for (const item of [...manifest].sort((a, b) => a.boxNo.localeCompare(b.boxNo))) {
+    const expectedPosition = item.position;
+    const actualPosition = actualMap.get(item.boxNo) ?? null;
+    let status: ReconciliationItem['status'];
+    if (actualPosition === null) {
+      status = 'missing';
+    } else if (
+      actualPosition.bay === expectedPosition.bay &&
+      actualPosition.row === expectedPosition.row &&
+      actualPosition.tier === expectedPosition.tier
+    ) {
+      status = 'verified';
+    } else {
+      status = 'misplaced';
+    }
+    const reconciled: ReconciliationItem = { boxNo: item.boxNo, expectedPosition, actualPosition, status };
+    expected.push(reconciled);
+    if (status === 'verified') verified.push(reconciled);
+    else if (status === 'missing') missing.push(reconciled);
+    else misplaced.push(reconciled);
+  }
+
+  const extra: ExtraBox[] = [];
+  for (const state of actual) {
+    if (expectedMap.has(state.boxNo)) continue;
+    if (state.position === null) continue; // 清单外箱已撤销：不视为实装
+    extra.push({ boxNo: state.boxNo, position: state.position });
+  }
+  extra.sort((a, b) => a.boxNo.localeCompare(b.boxNo));
+
+  return {
+    expected,
+    verified,
+    missing,
+    misplaced,
+    extra,
+    complete: missing.length === 0 && misplaced.length === 0 && extra.length === 0,
+  };
+}

@@ -9,7 +9,9 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/start.js",
     "dev": "tsx watch src/start.ts",
-    "test": "node --require tsx/cjs --test test/validator.test.ts",
+    "test": "node --require tsx/cjs --test test/validator.test.ts test/reconciliation.test.ts",
+    "test:e2e": "node test/e2e.js",
+    "test:e2e:verify": "node test/e2e-verification.js",
     "demo": "tsx examples/demo.ts"
   },
   "dependencies": {
@@ -21,6 +23,7 @@
     "@types/express": "^4.17.21",
     "@types/node": "^20.14.0",
     "@types/pg": "^8.11.6",
+    "embedded-postgres": "^18.4.0-beta.17",
     "tsx": "^4.16.0",
     "typescript": "^5.5.0"
   }

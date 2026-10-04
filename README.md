@@ -4,6 +4,8 @@ TypeScript / Node.js + PostgreSQL 实现的危险货箱三维舱位配载审定�
 
 调度员按**修订号（乐观并发）**整批调整箱位，服务仅按**最终布局**一次性校验全部规则，任一违反即**整批拒绝**并指出相关箱号、舱位与原因；签发装载清单时内容冻结到当时修订号，旧清单永久保留。
 
+现场装船阶段可对**某修订号的已签发清单开启核对作业**（基准即该冻结清单，后续布局调整或签发新清单都不改变它）：逐条上报实装坐标/撤销（唯一上报号、幂等重试、内容冲突报错），服务实时给出**应装 / 已核对 / 缺失 / 错位 / 清单外**五类明细；只有全部一致且无清单外箱时才能**结案冻结**，否则返回差异且作业继续开放。详见 [4.6 现场装船核对](#46-现场装船核对verification)。
+
 ---
 
 ## 1. 模型与规则
@@ -115,7 +117,7 @@ export DATABASE_URL='postgres://stowage:stowage@localhost:5432/stowage'
 npm start          # 启动（自动等待 DB + 建表）
 
 npm run dev        # 或 tsx watch 热重载
-npm test           # 纯函数校验规则单元测试（11 个）
+npm test           # 纯函数单元测试（配载规则 + 装船核对，共 20 个）
 ```
 
 ---
@@ -134,6 +136,12 @@ npm test           # 纯函数校验规则单元测试（11 个）
 | `POST` | `/api/voyages/:id/manifests` | **签发装载清单**（携带 `expectedRevision`） |
 | `GET` | `/api/voyages/:id/manifests` | 清单列表（旧清单保留，带 `current` 标记） |
 | `GET` | `/api/voyages/:id/manifests/:rev` | 取某修订号的冻结清单 |
+| `POST` | `/api/voyages/:id/verification-jobs/:rev` | **以某修订号已签发清单开启装船核对作业** |
+| `GET` | `/api/voyages/:id/verification-jobs` | 该航次的核对作业列表 |
+| `GET` | `/api/verification-jobs/:jobId` | 作业详情 + 核对明细（应装/已核对/缺失/错位/清单外） |
+| `POST` | `/api/verification-jobs/:jobId/reports` | **上报实装/撤销**（唯一 `reportId`，幂等重试） |
+| `GET` | `/api/verification-jobs/:jobId/reports` | 上报留痕（作业内顺序） |
+| `POST` | `/api/verification-jobs/:jobId/close` | **申请结案冻结**（完全一致才通过） |
 | `GET` | `/health` | 健康检查（含数据库连通性） |
 
 ### 4.1 登记航次
@@ -239,14 +247,100 @@ curl -sS -X POST http://localhost:3000/api/voyages/<id>/manifests \
 
 返回冻结清单（`current:true`）。之后再调整布局，重新 `GET /manifests` 可见旧清单 `current:false` 仍在；只有再次签发才会产生指向当前布局的新清单。
 
+### 4.6 现场装船核对（verification）
+
+现场以**某航次已签发清单的修订号**开启核对作业，作业的核对基准即该份**冻结清单**。开启之后无论布局如何调整、是否签发新清单，都**不改变**该作业的基准；新清单需另开新作业。
+
+**作业与基准**
+
+- `POST /api/voyages/:id/verification-jobs/:rev` 以修订号 `:rev` 的已签发清单开启作业；
+- 该修订号**没有已签发清单 → 404 `manifest_not_found`，拒绝开工**；
+- **同一清单至多一个作业**：对同一 `:rev` 重复开启幂等返回原作业（首次 201，重复 200；已结案作业同样返回原作业）。
+
+**上报语义**（`POST /api/verification-jobs/:jobId/reports`，一次可上报多条，作为一个顺序批次原子生效）：
+
+- 每条上报含**唯一 `reportId`**、`boxNo` 与实装位置 `position`，或撤销标记 `revoked:true`（`position:null` 等价于撤销，表示**未装**）；
+- **坐标越界（含清单外箱）→ 400 `invalid_coordinates`，整批拒绝、无副作用**；
+- **相同 `reportId` + 相同内容重试 → 202 幂等返回原受理结果**（不新增留痕）；相同 `reportId` + **不同内容 → 409 `report_conflict`**；
+- **每次新上报都 append 留痕**（作业内自增 `seq`）；以**每个箱号最后一条上报**确定该箱当前实装状态——装→撤销→再装，以最后一次为准；
+- 清单外箱号允许上报（用于发现“清单外实装”），其坐标同样必须在舱位范围内。
+
+**查询**（`GET /api/verification-jobs/:jobId`）返回 `reconciliation`：
+
+| 分类 | 含义 |
+| --- | --- |
+| `expected` | 应装：冻结清单中的每个箱（含期望坐标与当前状态） |
+| `verified` | 已核对：清单箱当前坐标与清单完全一致 |
+| `missing` | 缺失：清单箱当前未装（从未上报或最后一条为撤销） |
+| `misplaced` | 错位：清单箱已装但坐标与清单不一致（含期望/实装坐标） |
+| `extra` | 清单外箱：非清单箱当前处于实装（已撤销的清单外箱不计入） |
+
+`complete=true` 当且仅当无 `missing`、无 `misplaced`、无 `extra`。
+
+**结案**（`POST /api/verification-jobs/:jobId/close`）：
+
+- 只有 **所有清单箱当前坐标与冻结清单一致且无清单外箱** 才结案（201），并把核对结果**冻结**到作业上（`status=closed`、`closedAt`、此后查询恒返回冻结快照）；
+- 否则 **409 `verification_not_complete`**，响应体带完整差异，**作业继续开放**，可继续上报后再申请；
+- 对已结案作业重复结案幂等（200）。
+
+**并发与结案后行为**
+
+- 上报与结案在事务内对作业行 `SELECT … FOR UPDATE`，**严格顺序生效**；并发的结案与上报只有一个先决定最终态，结果自洽；
+- **结案后拒绝一切新上报**（409 `verification_job_closed`），但**已受理过的 `reportId` 仍可用相同内容幂等重试**（同号异内容仍 409）；
+- 原有的布局调整、清单签发、历史布局/清单查询行为完全保持兼容。
+
+**调用示例**
+
+```bash
+# 以修订号 4 的已签发清单开启作业
+curl -sS -X POST http://localhost:3000/api/voyages/<id>/verification-jobs/4
+# -> { "id": "<jobId>", "manifestRevision": 4, "status": "open", ... }
+
+# 上报实装 + 撤销（position 与 revoked 二选一）
+curl -sS -X POST http://localhost:3000/api/verification-jobs/<jobId>/reports \
+  -H 'content-type: application/json' -d '{
+  "reports": [
+    { "reportId": "R-1", "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+    { "reportId": "R-2", "boxNo": "BOX-2", "revoked": true }
+  ]
+}'
+
+# 查询核对明细
+curl -sS http://localhost:3000/api/verification-jobs/<jobId>
+
+# 申请结案（完全一致 201 冻结；有差异 409 且作业继续开放）
+curl -sS -X POST http://localhost:3000/api/verification-jobs/<jobId>/close
+```
+
+核对明细（有差异、作业仍开放时）示例：
+
+```json
+{
+  "id": "…jobId…", "manifestRevision": 4, "status": "open",
+  "expectedBoxCount": 3, "reportCount": 6, "closedAt": null,
+  "reconciliation": {
+    "expected": [ /* 每个清单箱一条，带 status */ ],
+    "verified":  [ { "boxNo": "BOX-1", "expectedPosition": {"bay":1,"row":1,"tier":0},
+                     "actualPosition": {"bay":1,"row":1,"tier":0}, "status": "verified" } ],
+    "missing":   [ { "boxNo": "BOX-2", "expectedPosition": {"bay":2,"row":1,"tier":0},
+                     "actualPosition": null, "status": "missing" } ],
+    "misplaced": [ { "boxNo": "BOX-3", "expectedPosition": {"bay":3,"row":1,"tier":0},
+                     "actualPosition": {"bay":3,"row":2,"tier":0}, "status": "misplaced" } ],
+    "extra":     [ { "boxNo": "GHOST", "position": {"bay":1,"row":2,"tier":0} } ],
+    "complete": false
+  }
+}
+```
+
 ### 状态码约定
 
 | 状态 | 场景 |
 | --- | --- |
-| 200 / 201 | 查询成功 / 创建或首次签发成功（同修订号重复签发返回 200） |
-| 400 | 请求体非法、未知箱、坐标越界、同批重复箱号 |
-| 404 | 航次/修订号/清单不存在 |
-| 409 | 修订号过期（乐观并发冲突） |
+| 200 / 201 | 查询成功 / 创建或首次签发、首次开启作业、首次结案成功（重复操作返回 200） |
+| 202 | 上报已受理（新受理或同号同内容幂等重试） |
+| 400 | 请求体非法、未知箱、坐标越界、同批重复箱号、非法作业/航次 ID |
+| 404 | 航次/修订号/清单/核对作业不存在（对未签发清单的修订号开工亦 404） |
+| 409 | 修订号过期；同上报号内容冲突；结案后新上报；核对尚有差异不能结案 |
 | 422 | 配载规则违反整批拒绝；或尚有箱未配位即签发 |
 | 503 | `/health` 数据库不可达 |
 
@@ -260,7 +354,13 @@ curl -sS -X POST http://localhost:3000/api/voyages/<id>/manifests \
   BASE=http://localhost:3000 bash examples/curl-examples.sh
   ```
 
-- `examples/api.http` —— REST Client / JetBrains HTTP Client 文件；
+- `examples/curl-verification.sh` —— 现场装船核对全流程 curl（开启作业→越界拒绝→上报→幂等/冲突→撤销→清单外箱→差异拒绝→结案冻结→结案后重试）：
+
+  ```bash
+  BASE=http://localhost:3000 bash examples/curl-verification.sh
+  ```
+
+- `examples/api.http` —— REST Client / JetBrains HTTP Client 文件（含配载与核对两组请求）；
 - `examples/demo.ts` —— Node 示例（内置 fetch）：
 
   ```bash
@@ -273,15 +373,18 @@ curl -sS -X POST http://localhost:3000/api/voyages/<id>/manifests \
 
 ```
 src/
-  domain.ts        领域模型 + 纯函数规则校验（最终布局五项规则、请求级检查、十进制重量）
+  domain.ts        领域模型 + 纯函数规则校验（最终布局五项规则、请求级检查、十进制重量、装船核对分类）
   service.ts       事务编排：乐观修订号、整批调整、签发冻结、并发互斥
+  verification.ts  装船核对事务编排：开启作业、上报留痕/幂等/冲突、核对分类、结案冻结
   db.ts            连接池、等待就绪、幂等建表
-  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单）
+  schema.sql       PostgreSQL 表结构（航次/列限/箱/不相容规则/修订布局/清单/核对作业/上报留痕）
   http/            Express 路由与 zod 请求校验
   config.ts errors.ts app.ts start.ts
 test/
-  validator.test.ts  规则单元测试（node --test）
-  e2e.js             对真实 PostgreSQL 的端到端/并发验证（开发辅助）
+  validator.test.ts       配载规则单元测试（node --test）
+  reconciliation.test.ts  装船核对分类单元测试（node --test）
+  e2e.js                  对真实 PostgreSQL 的配载端到端/并发验证（开发辅助）
+  e2e-verification.js     装船核对端到端/并发验证（开发辅助）
 examples/          curl / .http / Node 调用示例
 Dockerfile  docker-compose.yml
 ```
@@ -290,4 +393,6 @@ Dockerfile  docker-compose.yml
 
 - `voyages.rev` 为当前修订号；`placements` 按 `(voyage_id, rev)` 全量保存每个接受批次后的完整布局（历史可追溯）；
 - `manifests` + `manifest_items` 保存签发时刻的**独立冻结副本**，与后续布局解耦；
+- `verification_jobs` 以 `(voyage_id, manifest_rev)` 唯一约束保证**同一清单至多一个作业**，并引用冻结清单作为核对基准；`box_count` 冗余应装数，结案时把核对结果写入 `frozen_result` 冻结；
+- `verification_reports` 为 **append-only 上报留痕**：`(job_id, report_id)` 唯一（幂等/冲突判定）、`(job_id, seq)` 唯一（顺序生效）；以每箱号 `seq` 最大一条确定当前实装状态，`revoked` 行坐标为空表示撤销（未装）；
 - 重量以 `BIGINT` 微千克（1kg = 10⁶）存储，精确支持小数重量。
