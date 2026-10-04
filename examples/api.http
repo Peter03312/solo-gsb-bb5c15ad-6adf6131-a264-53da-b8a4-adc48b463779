@@ -1,0 +1,92 @@
+### 船舶危险货箱配载审定服务 REST 示例（VS Code REST Client / JetBrains HTTP Client）
+### 变量 @id 在首次创建后手动替换，或用客户端的脚本能力提取。
+
+@host = http://localhost:3000
+@id = 00000000-0000-0000-0000-000000000000
+
+### 健康检查
+GET {{host}}/health
+
+### 登记航次
+POST {{host}}/api/voyages
+Content-Type: application/json
+
+{
+  "voyageNo": "V-2026-001",
+  "bays": 3,
+  "rows": 2,
+  "tiers": 3,
+  "defaultColumnWeightLimit": "10000",
+  "columnWeightLimits": [
+    { "bay": 1, "row": 1, "weightLimit": "1200" }
+  ],
+  "boxes": [
+    { "boxNo": "BOX-1", "weight": "500",    "category": "1" },
+    { "boxNo": "BOX-2", "weight": "600",    "category": "3" },
+    { "boxNo": "BOX-3", "weight": "400",    "category": "5" },
+    { "boxNo": "BOX-4", "weight": "300.25", "category": "1" }
+  ],
+  "incompatRules": [
+    { "categoryA": "1", "categoryB": "3", "minDistance": 3 }
+  ]
+}
+
+### 航次列表
+GET {{host}}/api/voyages
+
+### 当前布局
+GET {{host}}/api/voyages/{{id}}/layout
+
+### 历史布局（某修订号）
+GET {{host}}/api/voyages/{{id}}/layout?rev=1
+
+### 整批调整（携带所见修订号；position=null 表示暂留空；允许同批交换）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 0,
+  "moves": [
+    { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 0 } },
+    { "boxNo": "BOX-2", "position": { "bay": 3, "row": 2, "tier": 0 } },
+    { "boxNo": "BOX-3", "position": { "bay": 2, "row": 2, "tier": 0 } },
+    { "boxNo": "BOX-4", "position": { "bay": 1, "row": 1, "tier": 1 } }
+  ]
+}
+
+### 同批交换（同列上下互换）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 1,
+  "moves": [
+    { "boxNo": "BOX-1", "position": { "bay": 1, "row": 1, "tier": 1 } },
+    { "boxNo": "BOX-4", "position": { "bay": 1, "row": 1, "tier": 0 } }
+  ]
+}
+
+### 撤位（暂留空）
+POST {{host}}/api/voyages/{{id}}/moves
+Content-Type: application/json
+
+{
+  "baseRevision": 2,
+  "moves": [
+    { "boxNo": "BOX-3", "position": null }
+  ]
+}
+
+### 签发装载清单（所有箱须已配位；冻结当前修订号）
+POST {{host}}/api/voyages/{{id}}/manifests
+Content-Type: application/json
+
+{
+  "expectedRevision": 4
+}
+
+### 清单列表（旧清单保留，current 标识是否指向当前布局）
+GET {{host}}/api/voyages/{{id}}/manifests
+
+### 取某修订号的冻结清单
+GET {{host}}/api/voyages/{{id}}/manifests/4
