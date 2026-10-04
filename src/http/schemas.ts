@@ -72,3 +72,22 @@ export const applyMovesSchema = applyMovesInput.transform((d) => ({
 export const issueManifestSchema = z.object({
   expectedRevision: nonNegativeInt,
 });
+
+// ---- 现场装船核对 ----
+
+export const openCheckJobSchema = z.object({
+  /** 作为核对基准的已签发清单修订号 */
+  manifestRevision: nonNegativeInt,
+});
+
+/**
+ * 单次核对上报：
+ *   position 非 null  → 实装位置（坐标需在舱位范围内）
+ *   position 为 null  → 撤销标记（该箱未装）
+ * 每次上报必须携带全作业唯一的 reportNo（幂等键）。
+ */
+export const checkReportSchema = z.object({
+  reportNo: z.string().trim().min(1, '上报号不能为空').max(64),
+  boxNo: z.string().trim().min(1, '箱号不能为空').max(32),
+  position: positionSchema.nullable(),
+});

@@ -72,3 +72,39 @@ CREATE TABLE IF NOT EXISTS manifest_items (
     PRIMARY KEY (voyage_id, rev, box_no),
     FOREIGN KEY (voyage_id, rev) REFERENCES manifests (voyage_id, rev) ON DELETE CASCADE
 );
+
+-- 现场装船核对作业：以航次某修订号的【已签发冻结清单】为核对基准开启，
+-- 同一清单最多一个作业（voyage_id+manifest_rev 唯一）。
+-- 基准引用冻结副本（manifest_items），后续布局调整/新清单不改变既有作业基准。
+CREATE TABLE IF NOT EXISTS check_jobs (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    voyage_id    UUID NOT NULL,
+    manifest_rev INTEGER NOT NULL CHECK (manifest_rev >= 0),
+    status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'closed')),
+    opened_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    closed_at    TIMESTAMPTZ,
+    -- 作业内上报顺序号（同作业互斥递增；也用于“每箱最后一条上报”判定）
+    next_seq     BIGINT NOT NULL DEFAULT 0 CHECK (next_seq >= 0),
+    UNIQUE (voyage_id, manifest_rev),
+    FOREIGN KEY (voyage_id, manifest_rev)
+        REFERENCES manifests (voyage_id, rev) ON DELETE CASCADE
+);
+
+-- 核对上报留痕：每次受理的上报均永久保存；(job_id, report_no) 唯一保证上报号幂等。
+-- revoked=true（撤销）等价于“未装”，此时坐标必须为空；否则三维坐标必填。
+CREATE TABLE IF NOT EXISTS check_reports (
+    job_id      UUID NOT NULL REFERENCES check_jobs(id) ON DELETE CASCADE,
+    report_no   TEXT NOT NULL,
+    seq         BIGINT NOT NULL CHECK (seq > 0),
+    box_no      TEXT NOT NULL,
+    revoked     BOOLEAN NOT NULL,
+    bay         INTEGER,
+    row         INTEGER,
+    tier        INTEGER,
+    accepted_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (job_id, report_no),
+    UNIQUE (job_id, seq),
+    CHECK (revoked OR (bay IS NOT NULL AND row IS NOT NULL AND tier IS NOT NULL)),
+    CHECK (NOT revoked OR (bay IS NULL AND row IS NULL AND tier IS NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_check_reports_box ON check_reports (job_id, box_no, seq);

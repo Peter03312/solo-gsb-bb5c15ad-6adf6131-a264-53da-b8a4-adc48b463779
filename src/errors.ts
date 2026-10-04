@@ -28,6 +28,11 @@ export class HttpError extends Error {
     );
   }
 
+  /** 409 Conflict：核对作业相关冲突（重复开工 / 上报号冲突 / 结案拒绝 / 作业已结案） */
+  static conflict(code: string, message: string, details?: unknown): HttpError {
+    return new HttpError(409, code, message, details);
+  }
+
   /** 422 Unprocessable Entity：请求格式合法但违反配载规则，整批拒绝 */
   static validationFailed(violations: unknown[]): HttpError {
     return new HttpError(
